@@ -91,7 +91,8 @@ def estimate_noise(gray):
     g = gray.astype(np.float32)
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: cv2.filter2D(g, -1, NOISE_KERNEL) без крайних строк и столбцов → median(|r|) / 0.6745 / 6
-    raise NotImplementedError("TODO 1")
+    response = cv2.filter2D(g, -1, NOISE_KERNEL)[1:-1, 1:-1]
+    return float(np.median(np.abs(response)) / (0.6745 * 6)) if response.size else 0.0
     # ───────────────────────────────────────────────────────────
 
 
@@ -103,7 +104,8 @@ def denoise(gray, noise_sigma, target=1.0, lo=1.0, hi=3.0):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: sigma_f = noise_sigma / (2·sqrt(π)·target), обрезать np.clip в [lo, hi]; cv2.GaussianBlur(gray, (0, 0), sigma_f)
-    raise NotImplementedError("TODO 2")
+    sigma_f = float(np.clip(noise_sigma / (2 * np.sqrt(np.pi) * target), lo, hi))
+    return cv2.GaussianBlur(gray, (0, 0), sigma_f), sigma_f
     # ───────────────────────────────────────────────────────────
 
 
@@ -133,7 +135,10 @@ def auto_canny(gray, k=0.33):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: m = np.median(gray); lo и hi — целые, обрезанные в [0, 255]; cv2.Canny(gray, lo, hi, L2gradient=True)
-    raise NotImplementedError("TODO 3")
+    m = float(np.median(gray))
+    lo = int(np.clip((1 - k) * m, 0, 255))
+    hi = int(np.clip((1 + k) * m, 0, 255))
+    return cv2.Canny(gray, lo, hi, L2gradient=True), (lo, hi)
     # ───────────────────────────────────────────────────────────
 
 
@@ -149,7 +154,13 @@ def quad_from_contours(edges, min_area=0.10, eps=0.02, close_k=5, top=5):
     h, w = edges.shape[:2]
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 8–10 строк: morphologyEx(MORPH_CLOSE) ядром close_k; findContours(RETR_LIST, CHAIN_APPROX_SIMPLE)[-2]; сортировка по contourArea; approxPolyDP; len == 4, isContourConvex, площадь
-    raise NotImplementedError("TODO 4")
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((close_k, close_k), np.uint8)) if close_k > 1 else edges
+    contours = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:top]:
+        quad = cv2.approxPolyDP(contour, eps * cv2.arcLength(contour, True), True)
+        if len(quad) == 4 and cv2.isContourConvex(quad) and cv2.contourArea(quad) >= min_area * h * w:
+            return quad.reshape(4, 2).astype(np.float32)
+    return None
     # ───────────────────────────────────────────────────────────
 
 
@@ -180,7 +191,9 @@ def line_through(p, q):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: np.cross((x1, y1, 1), (x2, y2, 1)); поделить на hypot(a, b); если hypot ≈ 0 — None
-    raise NotImplementedError("TODO 5")
+    line = np.cross(np.r_[np.asarray(p, np.float64), 1.0], np.r_[np.asarray(q, np.float64), 1.0])
+    norm = np.hypot(line[0], line[1])
+    return line / norm if norm > 1e-9 else None
     # ───────────────────────────────────────────────────────────
 
 
@@ -188,7 +201,8 @@ def intersect(l1, l2):
     """Точка пересечения двух прямых (x, y) — векторное произведение (L4); параллельные → None."""
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: x = np.cross(l1, l2); если |x[2]| < 1e-9 — None; иначе x[:2] / x[2]
-    raise NotImplementedError("TODO 6")
+    point = np.cross(np.asarray(l1, np.float64), np.asarray(l2, np.float64))
+    return point[:2] / point[2] if abs(point[2]) >= 1e-9 else None
     # ───────────────────────────────────────────────────────────
 
 
@@ -217,7 +231,27 @@ def ransac_line(pts, thr=2.0, iters=200, rng=None):
         return None, None
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 10–12 строк: цикл iters; i, j = rng.integers(0, n, 2); line_through (None — пропустить); point_line_dist < thr; запомнить лучшую маску; fit_line(pts[best]); пересчитать маску
-    raise NotImplementedError("TODO 7")
+    pts = np.asarray(pts, np.float64)
+    best, best_count = None, 1
+    pairs = rng.integers(0, n, (max(0, iters), 2))
+    # Свои RANSAC-гипотезы считаем пакетами: тот же случайный выбор двух
+    # точек, но расстояния NumPy вычисляет сразу для нескольких прямых.
+    for start in range(0, len(pairs), 64):
+        p, q = pts[pairs[start:start + 64, 0]], pts[pairs[start:start + 64, 1]]
+        lines = np.cross(np.column_stack((p, np.ones(len(p)))), np.column_stack((q, np.ones(len(q)))))
+        norms = np.hypot(lines[:, 0], lines[:, 1])
+        valid = norms > 1e-9
+        lines[valid] /= norms[valid, None]
+        distances = np.abs(lines[:, 0, None] * pts[None, :, 0] + lines[:, 1, None] * pts[None, :, 1] + lines[:, 2, None])
+        counts = np.count_nonzero(distances < thr, axis=1)
+        counts[~valid] = 0
+        index = int(np.argmax(counts))
+        if counts[index] > best_count:
+            best, best_count = distances[index] < thr, int(counts[index])
+    if best is None:
+        return None, None
+    line = fit_line(pts[best])
+    return line, point_line_dist(pts, line) < thr
     # ───────────────────────────────────────────────────────────
 
 
@@ -229,7 +263,15 @@ def dominant_lines(pts, n_lines=4, thr=2.0, iters=200, min_inliers=25, clear=3.0
     rng = rng or np.random.default_rng(0)
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 7–9 строк: цикл до n_lines; ransac_line на оставшихся; мало инлаеров — стоп; запомнить; оставить точки дальше clear · thr от найденной прямой
-    raise NotImplementedError("TODO 8")
+    remaining = np.asarray(pts, np.float64)
+    lines = []
+    for _ in range(n_lines):
+        line, inliers = ransac_line(remaining, thr, iters, rng)
+        if line is None or int(inliers.sum()) < min_inliers:
+            break
+        lines.append(line)
+        remaining = remaining[point_line_dist(remaining, line) > clear * thr]
+    return lines
     # ───────────────────────────────────────────────────────────
 
 
@@ -252,7 +294,21 @@ def quad_from_lines(lines, shape, margin=0.05, min_area=0.10):
     h, w = shape[:2]
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 12–15 строк: itertools.combinations(range(len(lines)), 4); три разбиения на пары; четыре intersect; все в кадре ± margin; order_corners; is_convex_quad; cv2.contourArea ≥ min_area·h·w
-    raise NotImplementedError("TODO 9")
+    for indices in itertools.combinations(range(len(lines)), 4):
+        a, b, c, d = (lines[i] for i in indices)
+        for first, second in (((a, b), (c, d)), ((a, c), (b, d)), ((a, d), (b, c))):
+            points = [intersect(l1, l2) for l1 in first for l2 in second]
+            if any(p is None for p in points):
+                continue
+            quad = np.asarray(points, np.float32)
+            if not np.isfinite(quad).all():
+                continue
+            if np.any(quad < (-margin * w, -margin * h)) or np.any(quad > ((w - 1) + margin * w, (h - 1) + margin * h)):
+                continue
+            quad = order_corners(quad)
+            if is_convex_quad(quad) and cv2.contourArea(quad) >= min_area * h * w:
+                return quad
+    return None
     # ───────────────────────────────────────────────────────────
 
 
@@ -276,7 +332,10 @@ def order_corners(pts):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: центроид; np.arctan2(dy, dx) → argsort (ось y вниз: по возрастанию угла — по часовой); np.roll так, чтобы первым стал argmin(x + y)
-    raise NotImplementedError("TODO 10")
+    points = np.asarray(pts, np.float32).reshape(4, 2)
+    delta = points - points.mean(axis=0)
+    ordered = points[np.argsort(np.arctan2(delta[:, 1], delta[:, 0]))]
+    return np.roll(ordered, -int(np.argmin(ordered.sum(axis=1))), axis=0)
     # ───────────────────────────────────────────────────────────
 
 
@@ -287,7 +346,18 @@ def rectify(img, corners, size=None, aspect=None):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 9–12 строк: order_corners; длины четырёх сторон; W и H по правилу выше; dst = углы (0, 0) … (W − 1, H − 1); getPerspectiveTransform; warpPerspective (W, H), BORDER_REPLICATE
-    raise NotImplementedError("TODO 11")
+    src = order_corners(corners)
+    top, right, bottom, left = np.linalg.norm(np.roll(src, -1, axis=0) - src, axis=1)
+    if size is not None:
+        width, height = map(int, size)
+    elif aspect is not None:
+        width = max(2, int(np.ceil(max(top, bottom, aspect * left, aspect * right))))
+        height = max(2, int(np.ceil(width / aspect)))
+    else:
+        width, height = max(2, int(np.ceil(max(top, bottom)))), max(2, int(np.ceil(max(left, right))))
+    dst = np.float32([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]])
+    transform = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(img, transform, (width, height), borderMode=cv2.BORDER_REPLICATE), transform
     # ───────────────────────────────────────────────────────────
 
 
@@ -297,7 +367,11 @@ def quad_iou(q1, q2, shape):
         return 0.0
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 5–6 строк: две маски np.zeros(shape[:2], uint8); cv2.fillConvexPoly углами order_corners (int32, округлить); IoU = пересечение / объединение
-    raise NotImplementedError("TODO 12")
+    mask1, mask2 = np.zeros(shape[:2], np.uint8), np.zeros(shape[:2], np.uint8)
+    cv2.fillConvexPoly(mask1, np.int32(np.round(order_corners(q1))), 1)
+    cv2.fillConvexPoly(mask2, np.int32(np.round(order_corners(q2))), 1)
+    union = int(np.count_nonzero(mask1 | mask2))
+    return float(np.count_nonzero(mask1 & mask2) / union) if union else 0.0
     # ───────────────────────────────────────────────────────────
 
 
@@ -312,7 +386,8 @@ def remove_shadows(gray, k=51):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: bg = cv2.medianBlur(gray, k); деление во float32 (фон не меньше 1); as_uint8(255 · gray / bg)
-    raise NotImplementedError("TODO 13")
+    bg = cv2.medianBlur(gray, k).astype(np.float32)
+    return as_uint8(255.0 * gray.astype(np.float32) / np.maximum(bg, 1.0))
     # ───────────────────────────────────────────────────────────
 
 
@@ -363,22 +438,189 @@ def edge_map(gray, canny="auto", k=0.33, close_k=9):
                    "canny": [lo, hi], "edge_pct": round(float(100.0 * (edges > 0).mean()), 2)}
 
 
+def _best_document_quad(quads, colour, edges, check=True):
+    """Выбирает границу страницы по поддержке всех сторон и перепаду цвета через них.
+
+    Тонкая линия текста имеет близкий цвет с обеих сторон. У внешней границы
+    бумаги сравниваем полосы внутри и снаружи; одного сильного отрезка мало.
+    Разметка и номера файлов в оценке кандидатов не используются.
+    """
+    h, w = edges.shape
+    candidates = []
+    for quad in quads:
+        if quad is None:
+            continue
+        q = order_corners(quad)
+        if not np.isfinite(q).all() or not is_convex_quad(q):
+            continue
+        area = cv2.contourArea(q) / (h * w)
+        outside = (q[:, 0] < 0) | (q[:, 0] >= w) | (q[:, 1] < 0) | (q[:, 1] >= h)
+        if area < 0.10 or outside.sum() >= 2:
+            continue
+        vectors = np.roll(q, -1, axis=0) - q
+        lengths = np.linalg.norm(vectors, axis=1)
+        if lengths.min() < 0.10 * min(h, w):
+            continue
+        cosine = np.sum(vectors * np.roll(vectors, -1, axis=0), axis=1) / (lengths * np.roll(lengths, -1))
+        if np.any(np.abs(cosine) > 0.94):
+            continue
+        candidates.append(q)
+    if not candidates:
+        return None
+
+    q = np.asarray(candidates, np.float32)
+    vectors = np.roll(q, -1, axis=1) - q
+    lengths = np.linalg.norm(vectors, axis=2)
+    normals = np.stack((-vectors[:, :, 1], vectors[:, :, 0]), axis=2) / lengths[:, :, None]
+    t = np.linspace(0.08, 0.92, 64, dtype=np.float32)
+    points = q[:, :, None, :] + vectors[:, :, None, :] * t[None, None, :, None]
+
+    def sample(source, positions):
+        x = np.clip(positions[..., 0], 0, w - 1)
+        y = np.clip(positions[..., 1], 0, h - 1)
+        x0, y0 = np.floor(x).astype(np.int32), np.floor(y).astype(np.int32)
+        x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+        wx, wy = (x - x0).astype(np.float32), (y - y0).astype(np.float32)
+        if source.ndim == 3:
+            wx, wy = wx[..., None], wy[..., None]
+        return ((1 - wy) * ((1 - wx) * source[y0, x0] + wx * source[y0, x1]) +
+                wy * ((1 - wx) * source[y1, x0] + wx * source[y1, x1]))
+
+    smooth = cv2.GaussianBlur(colour.astype(np.float32), (0, 0), 2.0)
+    inside = sum(sample(smooth, points + normals[:, :, None, :] * offset) for offset in (3, 6, 9)) / 3
+    outside = sum(sample(smooth, points - normals[:, :, None, :] * offset) for offset in (3, 6, 9)) / 3
+    contrast = np.linalg.norm(np.median(inside - outside, axis=2), axis=2) / np.sqrt(3)
+    # У прямого края перепад сосредоточен около линии. Медленный градиент
+    # тени и усреднённый изгиб края дают значительно более широкий переход.
+    near = np.linalg.norm(np.median(sample(smooth, points + normals[:, :, None, :] * 3) -
+                                   sample(smooth, points - normals[:, :, None, :] * 3), axis=2), axis=2)
+    far = np.linalg.norm(np.median(sample(smooth, points + normals[:, :, None, :] * 9) -
+                                  sample(smooth, points - normals[:, :, None, :] * 9), axis=2), axis=2)
+    localisation = near / np.maximum(far, 1.0)
+    yy, xx = np.mgrid[-3:4, -3:4]
+    neighbourhood = ((xx * xx + yy * yy) <= 9).astype(np.float32)
+    nearby_edge = np.float32(cv2.filter2D(np.float32(edges > 0), -1, neighbourhood,
+                                        borderType=cv2.BORDER_CONSTANT) > 0)
+    valid = (points[..., 0] >= 0) & (points[..., 0] < w) & (points[..., 1] >= 0) & (points[..., 1] < h)
+    coverage = np.mean((sample(nearby_edge, points) >= 0.5) & valid, axis=2)
+    accepted = (coverage.min(axis=1) >= 0.35) & (coverage.mean(axis=1) >= 0.60) & (contrast.min(axis=1) >= 1.5)
+    strong_boundary = contrast.min(axis=1) >= 15.0
+    accepted &= strong_boundary | np.all((localisation >= 0.75) & (localisation <= 1.75), axis=1)
+    # Слабая внутренняя рамка не должна отрезать значительную часть текста.
+    # Сильный контраст на всех четырёх сторонах достаточен и без этой подсказки:
+    # вне листа тоже могут находиться мелкие детали (например, клавиатура).
+    gray = to_gray(colour)
+    background = erase_text(gray, 9).astype(np.int16)
+    ink_y, ink_x = np.nonzero(background - gray > max(10.0, 4.0 * estimate_noise(gray)))
+    if len(ink_x) >= 100:
+        indices = np.linspace(0, len(ink_x) - 1, min(2048, len(ink_x)), dtype=np.int32)
+        ink_points = np.stack((ink_x[indices], ink_y[indices]), axis=1)
+        delta = ink_points[None, None, :, :] - q[:, :, None, :]
+        cross = vectors[:, :, None, 0] * delta[:, :, :, 1] - vectors[:, :, None, 1] * delta[:, :, :, 0]
+        enclosed = np.mean(np.all(cross >= -2.0 * lengths[:, :, None], axis=1), axis=1)
+        accepted &= (contrast.min(axis=1) >= 15.0) | (enclosed >= 0.85)
+    if not check:
+        accepted[:] = True
+    scores = np.log1p(contrast).mean(axis=1) + np.log1p(contrast).min(axis=1)
+    scores += 0.2 * np.array([cv2.contourArea(candidate) / (h * w) for candidate in q])
+    scores[~accepted] = -np.inf
+    best = int(np.argmax(scores))
+    return q[best] if np.isfinite(scores[best]) else None
+
+
+def _document_candidates(edges, method, seed):
+    """Кандидаты исходных двух путей; Хаф рассматривает несколько четвёрок."""
+    if method == "contour":
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        contours = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+        candidates = []
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:20]:
+            quad = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
+            if len(quad) == 4 and cv2.isContourConvex(quad):
+                candidates.append(quad.reshape(4, 2).astype(np.float32))
+        return candidates
+    segments = hough_segments(edges)
+    if len(segments) < 4:
+        return []
+    lines = dominant_lines(segment_points(segments), n_lines=16, rng=np.random.default_rng(seed))
+    if len(lines) < 4:
+        return []
+    # Те же три разбиения на противоположные стороны, сразу для всех четвёрок.
+    # Векторизация нужна, чтобы перебор кандидатов не тормозил видеорежим.
+    selected = np.asarray(lines, np.float64)[np.asarray(list(itertools.combinations(range(len(lines)), 4)))]
+    candidates = []
+    h, w = edges.shape
+    for pairs in (((0, 2), (0, 3), (1, 2), (1, 3)),
+                  ((0, 1), (0, 3), (2, 1), (2, 3)),
+                  ((0, 1), (0, 2), (3, 1), (3, 2))):
+        intersections = np.stack([np.cross(selected[:, i], selected[:, j]) for i, j in pairs], axis=1)
+        finite = np.all(np.abs(intersections[:, :, 2]) >= 1e-9, axis=1)
+        intersections = intersections[finite]
+        points = intersections[:, :, :2] / intersections[:, :, 2:]
+        valid = np.all((points >= (-0.05 * w, -0.05 * h)) &
+                       (points <= ((w - 1) + 0.05 * w, (h - 1) + 0.05 * h)), axis=(1, 2))
+        points = points[valid].astype(np.float32)
+        if not len(points):
+            continue
+        delta = points - points.mean(axis=1, keepdims=True)
+        order = np.argsort(np.arctan2(delta[:, :, 1], delta[:, :, 0]), axis=1)
+        points = np.take_along_axis(points, order[:, :, None], axis=1)
+        vectors = np.roll(points, -1, axis=1) - points
+        turns = vectors[:, :, 0] * np.roll(vectors[:, :, 1], -1, axis=1) - vectors[:, :, 1] * np.roll(vectors[:, :, 0], -1, axis=1)
+        convex = np.all(turns > 0, axis=1) | np.all(turns < 0, axis=1)
+        area = 0.5 * np.abs(np.sum(points[:, :, 0] * np.roll(points[:, :, 1], -1, axis=1) -
+                                   points[:, :, 1] * np.roll(points[:, :, 0], -1, axis=1), axis=1))
+        candidates.extend(points[convex & (area >= 0.10 * h * w)])
+    return candidates
+
+
 def detect(img, method="auto", long_side=640, canny="auto", k=0.33, close_k=9, paper_check=True, seed=0):
     """Кадр → (углы листа в координатах кадра, по часовой от верхнего левого, или None; числа этапов).
 
     method: ``contour`` — путь 3a, ``hough`` — путь 3b, ``auto`` — сначала контуры, не нашли — Хаф.
     canny: ``auto`` (пороги от медианы, параметр k) или пара (lo, hi). close_k — ядро закрытия текста (0 — без него).
+    При отказе пробуем низкие пороги на яркости и синем канале и проверяем
+    кандидатов по всем четырём сторонам. paper_check включает эту проверку.
     Эту склейку можно менять и улучшать — сигнатуры функций с TODO менять нельзя.
     """
     t0 = time.perf_counter()
     gray, scale = work_image(img, long_side)
+    colour = cv2.resize(img, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_AREA) if scale < 1 else img
+    if colour.ndim == 2:
+        colour = cv2.cvtColor(colour, cv2.COLOR_GRAY2BGR)
     edges, info = edge_map(gray, canny, k, close_k)
-    quad, path = None, None
-    for m in (("contour", "hough") if method == "auto" else (method,)):
-        q = quad_from_contours(edges) if m == "contour" else quad_from_hough(edges, seed=seed)
-        if q is not None and (not paper_check or looks_like_paper(gray, q)):
-            quad, path = order_corners(to_full(q, scale)), m
-            break
+    initial_canny = info["canny"]
+    methods = ("contour", "hough") if method == "auto" else (method,)
+
+    def find(current_edges, recovery):
+        for current_method in methods:
+            if recovery:
+                candidates = _document_candidates(current_edges, current_method, seed)
+            else:
+                candidate = quad_from_contours(current_edges) if current_method == "contour" else quad_from_hough(current_edges, seed=seed)
+                candidates = [candidate]
+            if paper_check:
+                candidate = _best_document_quad(candidates, colour, current_edges)
+            else:
+                candidate = _best_document_quad(candidates, colour, current_edges, check=False) if recovery else next((q for q in candidates if q is not None), None)
+            if candidate is not None:
+                return candidate, current_method
+        return None, None
+
+    quad, path = find(edges, False)
+    info.update(initial_canny=initial_canny, edge_channel="gray", recovery=False)
+    if quad is None:
+        # На белом фоне яркостная граница слаба; синий канал также использует
+        # цветовое различие бумаги и ткани. Пара порогов одинакова для всех кадров.
+        for channel_name, source in (("blue", colour[:, :, 0]), ("gray", gray)):
+            smooth, _ = denoise(source, estimate_noise(source))
+            recovery_edges = cv2.Canny(erase_text(smooth, close_k), 5, 15, L2gradient=True)
+            quad, path = find(recovery_edges, True)
+            if quad is not None:
+                info.update(canny=[5, 15], edge_channel=channel_name, recovery=True,
+                            edge_pct=round(float(100.0 * (recovery_edges > 0).mean()), 2))
+                break
+    quad = order_corners(to_full(quad, scale)) if quad is not None else None
     info.update(path=path, ms=round(1000.0 * (time.perf_counter() - t0), 1))
     return quad, info
 
@@ -413,7 +655,8 @@ def save_annotations(path, ann):
 
 def pick_corners(img, title="4 klika po uglam lista | Enter - gotovo | r - zanovo | n - lista net"):
     """Окно OpenCV: четыре клика по углам → float32 (4, 2); клавиша n — «листа нет» (None). Только локально."""
-    pts, scale, state = [], min(1.0, 1200.0 / img.shape[1]), {"none": False}
+    scale = min(1.0, 700.0 / img.shape[1], 550.0 / img.shape[0])
+    pts, state = [], {"none": False}
 
     def on_click(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 4:
@@ -683,7 +926,7 @@ def build_parser():
         s.add_argument("--canny", type=_canny_arg, default="auto", help="auto (пороги от медианы) или LO,HI")
         s.add_argument("--k", type=float, default=0.33, help="ширина вилки порогов вокруг медианы")
         s.add_argument("--close", type=int, default=9, help="ядро закрытия, стирающего текст (0 — выключить)")
-        s.add_argument("--no-paper-check", action="store_true", help="не проверять, что внутри четырёхугольника светлее, чем вокруг")
+        s.add_argument("--no-paper-check", action="store_true", help="отключить проверку поддержки сторон и перепада цвета на границах листа")
         s.add_argument("--seed", type=int, default=0, help="зерно RANSAC")
 
     s = sub.add_parser("noise", help="оценка шума кадра и проверка фильтра"); s.add_argument("image"); s.add_argument("--long-side", type=int, default=640)
